@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Editor/OS cruft
+*.swp
+*~
+
+# Temp extraction dirs
+_extracted/
+_inner/
+
+# Local Claude Code settings
+.claude/settings.local.json
