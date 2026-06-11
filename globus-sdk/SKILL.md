@@ -6,11 +6,13 @@ description: >
   Use this skill whenever the user mentions Globus, globus_sdk, globus-sdk, globus-compute-sdk,
   globus_compute_sdk, Globus Transfer, Globus Flows, Globus Compute, Globus Search, GlobusApp,
   UserApp, ClientApp, FlowsClient, TransferClient, SearchClient, SpecificFlowClient,
+  data_access scopes, GARE/ConsentRequired errors, metadata ingest, dataset discovery,
   or any Globus service interaction in Python. Also trigger when the user has code using
   deprecated Globus patterns like NativeAppAuthClient manual OAuth flows, fair_research_login,
   globus-automate-client, or funcX — this skill knows the modern replacements. Even if the
   user doesn't say "Globus" explicitly, trigger if they mention research data transfer between
-  HPC endpoints, collections, or writing automation flows for scientific data pipelines.
+  HPC endpoints, collections, authenticated scientific automation, dataset catalogs,
+  metadata indexing, or writing automation flows for scientific data pipelines.
 ---
 
 # Globus SDK Skill
@@ -73,16 +75,34 @@ transfer_client = globus_sdk.TransferClient(app=app)
 
 For detailed guidance on each Globus service, read the appropriate reference file:
 
-| Service | Reference File | When to Read |
-|---------|---------------|--------------|
+| Area | Reference File | When to Read |
+|------|---------------|--------------|
 | Transfer | `references/transfer.md` | File transfers, collection operations, `TransferData`, `DeleteData` |
 | Flows | `references/flows.md` | Workflow automation, flow definitions, `FlowsClient`, `SpecificFlowClient` |
 | Compute | `references/compute.md` | Remote function execution, `Executor`, endpoints |
-| Search | `references/search.md` | Indexing metadata, querying, `SearchClient`, `SearchQuery` |
-| Auth | `references/auth.md` | Detailed auth patterns, scopes, consent handling, `GlobusAppConfig` |
+| Search | `references/search.md` | Search SDK calls plus metadata catalog, visibility, ingest, query, and discovery workflow patterns |
+| Auth | `references/auth.md` | Auth SDK primitives plus actor choice, scopes, consent handling, secure token handling, and service automation |
 
 **Always read the relevant reference file(s) before writing Globus code.** The reference files
 contain essential patterns, common pitfalls, and up-to-date API signatures.
+
+## Workflow-First Guidance
+
+When the user asks for a complete researcher workflow, do not stop at a single SDK call.
+Identify the actor, resources, and lifecycle first:
+
+1. **Actor:** Is this an interactive researcher, a service account, a facility pipeline,
+   or a scheduled job?
+2. **Resources:** Which collections, search indices, flows, groups, or compute endpoints
+   need permissions?
+3. **Scopes:** Which default scopes are enough, and which collection-specific
+   `data_access` or service-specific scopes must be requested?
+4. **State:** Where are tokens, task IDs, run IDs, index IDs, and provenance persisted?
+5. **Failure modes:** Handle GARE/consent errors, missing permissions, trial Search
+   indices, async ingest tasks, transfer failures, and endpoint/environment mismatch.
+
+For Auth-heavy requests, read `references/auth.md`. For Search-heavy requests,
+read `references/search.md`.
 
 ## Package Installation
 

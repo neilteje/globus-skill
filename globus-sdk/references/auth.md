@@ -11,6 +11,20 @@
 | Token storage | JSON file by default | JSON file by default |
 | Refresh tokens | Optional (off by default) | N/A (uses short-lived access tokens) |
 
+## Choose the Auth Model First
+
+| Scenario | Use | Why |
+|----------|-----|-----|
+| Researcher runs a local script or notebook | `globus_sdk.UserApp` with a Native App client ID | Acts as the user, prompts in browser, stores/refreshes user tokens when configured |
+| CLI tool used repeatedly by a human | `UserApp` with `request_refresh_tokens=True` | Avoids repeated browser login while preserving user context |
+| Deployed service, cron job, CI, facility automation | `globus_sdk.ClientApp` with a Confidential Client | No browser, acts as the client identity |
+| Service must operate on user-owned data | Usually `UserApp`, a flow run, or delegated/user consent design | Client credentials are not a substitute for user authorization |
+| Multi-service workflow: Transfer + Search + Flows | One shared `GlobusApp` instance | One auth context; service clients declare scopes through the app |
+
+Avoid writing code that starts with low-level token exchange. Start with the actor
+and select `UserApp` or `ClientApp`; only drop lower when a task explicitly requires
+custom OAuth machinery.
+
 ## UserApp In-Depth
 
 ```python
@@ -91,6 +105,28 @@ app = globus_sdk.UserApp(
 )
 ```
 
+### Scope and Consent Workflow
+
+When generating or debugging code:
+
+1. List every service touched: Transfer, Search, Flows, Compute, Groups, Timers.
+2. For Transfer, identify every collection that requires `data_access`.
+3. Add collection data access scopes before the operation:
+
+```python
+tc = globus_sdk.TransferClient(app=app)
+tc.add_app_data_access_scope((source_collection_id, destination_collection_id))
+```
+
+4. For Flows management, request `FlowsClient.scopes.manage_flows` only when the
+   code creates or updates flows. Starting a flow needs the flow-specific user
+   scope through `SpecificFlowClient`.
+5. For Search ingest/admin operations, use the Search scopes required by the SDK
+   client and index permissions. Query-only code should not over-request admin
+   capability.
+6. Handle `ConsentRequired`/GARE by surfacing `required_scopes`; do not swallow
+   the error or retry with the same scopes forever.
+
 ## Migrating from Deprecated Patterns
 
 ### From fair_research_login
@@ -156,3 +192,110 @@ app = globus_sdk.UserApp("my-app", client_id=CLIENT_ID, config=config)
 When `auto_retry_gares=True`, if an API call fails because additional consent
 is needed, the app will automatically prompt the user to login again with the
 required scopes and retry the call.
+
+For batch jobs, fail clearly and log the missing scopes rather than prompting:
+
+```python
+try:
+    task_doc = tc.submit_transfer(transfer_data)
+except globus_sdk.TransferAPIError as err:
+    if err.info.consent_required:
+        required = err.info.consent_required.required_scopes
+        raise RuntimeError(f"Additional Globus consent required: {required}") from err
+    raise
+```
+
+## Interactive Research Script Template
+
+```python
+import globus_sdk
+from globus_sdk import GlobusAppConfig
+
+CLIENT_ID = "YOUR_NATIVE_CLIENT_ID"
+
+config = GlobusAppConfig(
+    request_refresh_tokens=True,
+    auto_retry_gares=True,
+)
+
+with globus_sdk.UserApp("my-research-workflow", client_id=CLIENT_ID, config=config) as app:
+    transfer_client = globus_sdk.TransferClient(app=app)
+    search_client = globus_sdk.SearchClient(app=app)
+
+    # Add data_access scopes before touching protected collections.
+    transfer_client.add_app_data_access_scope("SOURCE_COLLECTION_UUID")
+    transfer_client.add_app_data_access_scope("DEST_COLLECTION_UUID")
+
+    # Continue with ls, transfer, search ingest/query, or flow startup.
+```
+
+Operational notes:
+
+- Use a stable app name; changing it can create a separate token storage location.
+- `auto_retry_gares=True` is useful for scripts because the app can prompt again
+  when a service reports missing consent.
+- Request refresh tokens only when the workflow benefits from durable sessions.
+  For one-off examples, default token storage is usually enough.
+- Do not print access tokens or client secrets. Print task IDs, run IDs, and
+  required scopes instead.
+
+## Service Automation Template
+
+```python
+import os
+
+import globus_sdk
+
+app = globus_sdk.ClientApp(
+    "facility-indexer",
+    client_id=os.environ["GLOBUS_CLIENT_ID"],
+    client_secret=os.environ["GLOBUS_CLIENT_SECRET"],
+)
+
+transfer_client = globus_sdk.TransferClient(app=app)
+search_client = globus_sdk.SearchClient(app=app)
+```
+
+Before using this pattern, make the generated code explain the permission model:
+
+- The identity is the client identity, not the human operator.
+- Collections, groups, Search indices, and flows must grant permissions to the
+  client identity where supported.
+- For user-owned data, design for explicit user consent or a flow rather than
+  assuming the client can impersonate users.
+- Secrets belong in environment variables, a secret manager, or deployment config,
+  never inline examples.
+
+## Common Auth Failure Modes
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| `ConsentRequired` or GARE | Missing service or collection-specific scope | Add the relevant app scope; enable `auto_retry_gares` for interactive scripts |
+| 403 from Transfer on a collection | User/client lacks collection permission or `data_access` consent | Verify collection ACLs and add data access scope before the operation |
+| Service account can authenticate but cannot access data | Permissions were granted to a human, not the client identity | Grant access to `{CLIENT_ID}@clients.auth.globus.org` where applicable |
+| Browser prompt appears in automation | Code used `UserApp` where `ClientApp` is required | Switch to `ClientApp` and load credentials from deployment secrets |
+| Works once, fails on next run | Tokens not persisted or refresh tokens not requested | Use stable app name and `request_refresh_tokens=True` for durable human sessions |
+| Agent emits `NativeAppAuthClient` or `fair_research_login` | Deprecated training-data pattern | Rewrite to `UserApp`/`ClientApp` |
+
+## Security Defaults for Generated Code
+
+- Put `CLIENT_ID` in config; put `CLIENT_SECRET` only in env/secrets.
+- Never log tokens, authorization codes, or secrets.
+- Persist IDs needed for recovery: Transfer task IDs, Flow run IDs, Search task IDs,
+  function IDs, index IDs.
+- Prefer least privilege: query examples should not request ingest/admin scopes;
+  ingest examples should not request flow-management scopes unless they create flows.
+- Explain who owns each operation: user identity, client identity, group, or flow
+  run actor.
+
+## Research Workflow Auth Heuristics
+
+- Data publication/catalog workflows usually need Transfer plus Search. Model
+  collection permissions, Search index permissions, and metadata visibility together.
+- Facility pipelines often need a service identity for automation, but human
+  researchers still need group-based visibility and clear provenance.
+- Compute-adjacent workflows need separate attention to endpoint authorization and
+  Python environment setup; Globus Auth succeeding does not prove the endpoint can
+  execute the submitted function.
+- Flows are useful when the workflow needs reusable, shareable, auditable user
+  authorization boundaries across Transfer, Compute, Search, and notifications.
